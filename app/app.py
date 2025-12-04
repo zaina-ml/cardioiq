@@ -187,8 +187,7 @@ with tabs[0]:
 
                 fig = plot_ecg_cam(ecg_tensor, cam, label)
                 st.plotly_chart(fig, use_container_width=True)
-
-                # Save using UID and store email inside document for display
+                
                 user_uid = st.session_state['user']['localId']
                 user_email = st.session_state['user']['email']
                 safe_filename = getattr(uploaded_file, "name", "uploaded_ecg.csv")
