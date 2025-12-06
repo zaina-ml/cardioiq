@@ -1,18 +1,8 @@
-import os
-import wfdb
 import random
 import numpy as np
-from dataclasses import dataclass
-from typing import Optional, Tuple, List
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch import amp
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from scipy.interpolate import interp1d
 
-from sklearn.metrics import average_precision_score, precision_score, recall_score, f1_score, roc_auc_score, precision_recall_curve
-
+from dataclasses import dataclass
 
 @dataclass
 class TrainCfg:
@@ -31,15 +21,15 @@ class TrainCfg:
     test_ratio = 0.15
     crop_len: int = 720
     batch_size: int = 128
-    max_epochs: int = 50
+    max_epochs: int = 150
     lr: float = 3e-4
     weight_decay: float = 1e-4
     use_sampler: bool = True
     sampler_scale: float = 0.2
-    focal_gamma: float = 1.5
+    focal_gamma: float = 1
     hybrid_switch_epoch: int = 15
     augment: bool = True
-    severity: int = 0.25
+    severity: float = 0.25
     mixup_p: float = 0.5
     mixup_alpha: float = 0.1
     clip_grad_norm: float = 1.0
