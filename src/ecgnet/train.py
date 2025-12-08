@@ -1,5 +1,6 @@
 from config import CFG
 from data import ECGDataset
+from utils import tune_threshold_from_probs
 
 
 import os
@@ -43,14 +44,6 @@ class BCEWeighted(nn.Module):
             logits, targets, pos_weight=self.pos_weight, reduction="mean"
         )
 
-def tune_threshold_from_probs(y_true: np.ndarray, probs: np.ndarray):
-    precision, recall, thresholds = precision_recall_curve(y_true, probs)
-    f1s = 2 * precision * recall / (precision + recall + 1e-8)
-    best_idx = int(np.nanargmax(f1s))
-
-    if best_idx >= len(thresholds):
-        return 0.5, f1s[best_idx]
-    return float(thresholds[best_idx]), float(f1s[best_idx])
 
 
 def train_model(model: nn.Module,

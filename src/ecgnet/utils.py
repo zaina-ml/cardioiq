@@ -1,3 +1,12 @@
+def tune_threshold_from_probs(y_true: np.ndarray, probs: np.ndarray):
+    precision, recall, thresholds = precision_recall_curve(y_true, probs)
+    f1s = 2 * precision * recall / (precision + recall + 1e-8)
+    best_idx = int(np.nanargmax(f1s))
+
+    if best_idx >= len(thresholds):
+        return 0.5, f1s[best_idx]
+    return float(thresholds[best_idx]), float(f1s[best_idx])
+
 def evaluate_model(model, dataloader, device='cuda'):
     model.eval()
     y_true, y_scores = [], []

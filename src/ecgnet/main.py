@@ -25,7 +25,7 @@ if __name__ == "__main__":
     save_dir = "models"
     os.makedirs(save_dir, exist_ok=True)
 
-    save_path = os.path.join(save_dir, "cardioiq_model_modular.pt")
+    save_path = os.path.join(save_dir, "ecgnet_modular.pt")
     torch.save({
         "model_state_dict": trained_model.state_dict(),
         "threshold": threshold,
