@@ -7,12 +7,6 @@ def evaluate_model(model, dataset, cfg=CFG):
 
 
 def show_patient_metadata(features, true_risk, pred_risk):
-    """
-    features: 1D tensor of size 11
-    true_risk: scalar tensor (0–1)
-    pred_risk: scalar tensor (0–1)
-    """
-
     (ecg_prob,
      exercise,
      diet,
@@ -47,12 +41,8 @@ def show_patient_metadata(features, true_risk, pred_risk):
     print("\n==================================================\n")
 
 def analyze_dataset(dataset):
-    """
-    Computes and prints the average value of each input feature
-    and the average target risk score.
-    """
-    features = dataset.features  # shape [N, 11]
-    targets = dataset.targets    # shape [N]
+    features = dataset.features
+    targets = dataset.targets
 
     mean_feats = features.mean(dim=0)
     mean_target = targets.mean().item()

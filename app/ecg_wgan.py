@@ -2,10 +2,8 @@ import torch
 from torch import nn
 
 class ECGGenerator(nn.Module):
-    def __init__(self, z_dim=100, n_classes=2):
+    def __init__(self, z_dim=100):
         super().__init__()
-
-        self.embed = nn.Embedding(n_classes, z_dim)
         self.fc = nn.Linear(z_dim, 256 * 45)
 
         self.net = nn.Sequential(
@@ -25,11 +23,6 @@ class ECGGenerator(nn.Module):
             nn.Tanh()
         )
 
-    def forward(self, z, y):
-        y_emb = self.embed(y)
-        z = z + y_emb
+    def forward(self, z):
         x = self.fc(z).view(-1, 256, 45)
-        out = self.net(x)
-
-        out = torch.clamp(out, -0.999, 0.999)
-        return out
+        return self.net(x)

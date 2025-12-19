@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import Dataset
-import random
 from config import CFG
+import random
 
 class SyntheticPatientDataset(Dataset):
     def __init__(self, num_samples=2000, cfg=CFG):
@@ -9,47 +9,58 @@ class SyntheticPatientDataset(Dataset):
         self.targets = []
 
         for _ in range(num_samples):
-            # Core features
             ecg_prob = random.uniform(0, 1)
             exercise = random.uniform(0, 1)
             diet = random.uniform(0, 1)
             sleep = random.uniform(0, 1)
-            smoking = random.choice([0, 1])
-            alcohol = random.choice([0, 1])
-            age = random.uniform(20, 80)  # raw age
-            bmi = random.uniform(18.5, 30)
-            bp = random.uniform(90, 180)
-            chol = random.uniform(150, 300)
-            sex = random.choice([0, 1])  # male=0, female=1
 
-            # Normalize all numeric features to 0–1
-            age_norm = (age - 20)/60
-            bmi_norm = (bmi - 18.5)/11.5
-            bp_norm = (bp - 90)/90
-            chol_norm = (chol - 150)/150
+            smoking_per_week = random.uniform(0, 140)
+            alcohol_per_week = random.uniform(0, 30)
+
+            age = random.uniform(20, 80)
+            sex = random.choice([0, 1])
+            bmi = random.uniform(18.5, 35)
+
+            sys_bp = random.uniform(90, 180)
+            dia_bp = random.uniform(60, 120)
+
+            age_norm = (age - 20) / 60
+            bmi_norm = (bmi - 18.5) / 16.5
+            sys_bp_norm = (sys_bp - 90) / 90
+            dia_bp_norm = (dia_bp - 60) / 60
+            smoking_norm = smoking_per_week / 140
+            alcohol_norm = alcohol_per_week / 30
 
             feat = [
-                ecg_prob, exercise, diet, sleep,
-                smoking, alcohol, age_norm, sex,
-                bmi_norm, bp_norm, chol_norm
+                ecg_prob,
+                exercise,
+                diet,
+                sleep,
+                smoking_norm,
+                alcohol_norm,
+                age_norm,
+                sex,
+                bmi_norm,
+                sys_bp_norm,
+                dia_bp_norm
             ]
+
             self.features.append(torch.tensor(feat, dtype=torch.float32))
 
-            # Simple risk: ECG dominates, others add minor contributions
-            risk = min(max(
-                0.5 * ecg_prob + 
-                0.1 * (1 - exercise) + 
-                0.1 * (1 - diet) + 
-                0.1 * (1 - sleep) + 
-                0.05 * smoking + 
-                0.05 * alcohol + 
-                0.1 * age_norm + 
-                0.05 * bmi_norm + 
-                0.05 * bp_norm + 
-                0.05 * chol_norm,
-                0), 1
+            risk = (
+                0.5 * ecg_prob +
+                0.1 * (1 - exercise) +
+                0.1 * (1 - diet) +
+                0.1 * (1 - sleep) +
+                0.1 * smoking_norm +
+                0.1 * alcohol_norm +
+                0.15 * age_norm +
+                0.15 * sys_bp_norm +
+                0.1 * dia_bp_norm +
+                0.1 * bmi_norm
             )
 
+            risk = max(0.0, min(risk, 1.0))
             self.targets.append(torch.tensor(risk, dtype=torch.float32))
 
         self.features = torch.stack(self.features).to(cfg.device)
