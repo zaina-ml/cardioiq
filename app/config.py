@@ -1,0 +1,27 @@
+MODEL_THRESHOLDS = {
+    "THRESHOLD": 0.88,
+}
+
+THRESHOLDS = {
+    "ECG_ABNORMAL_HIGH": 0.90,
+    "ECG_ABNORMAL_MODERATE": 0.70,
+    "ECG_ABNORMAL_LOW": 0.30,
+
+    "RISK_HIGH": 0.70,
+    "RISK_MODERATE": 0.50,
+    "RISK_LOW": 0.30,
+
+    "DELTA_RISK_HIGH": 0.15,
+    "DELTA_RISK_MODERATE": 0.08,
+
+    "BP_SYS_HIGH": 140,
+    "BP_DIA_HIGH": 90,
+    "BP_SYS_ELEVATED": 130,
+    "BP_DIA_ELEVATED": 85,
+}
+
+PDF_CONFIG = {
+    "FONT": "Arial",
+    "MARGIN": 15,
+    "IMG_WIDTH": 180,
+}

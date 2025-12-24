@@ -3,9 +3,14 @@ import torch
 import numpy as np
 import plotly.graph_objects as go
 import pandas as pd
+import io
+import zipfile
+from fpdf import FPDF
+import time
 import os
 import uuid
 from datetime import datetime
+import tempfile
 import pyrebase
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -14,6 +19,9 @@ from ecgnet import ECGNet
 from cardiorisknet import CardioRiskNet
 from ecg_wgan import ECGGenerator
 from gradcam import GradCAM, plot_ecg_cam
+from generate_report import generate_profile_pdf
+from analysis import generate_findings
+from config import THRESHOLDS, MODEL_THRESHOLDS
 
 if "active_profile" not in st.session_state:
     st.session_state.active_profile = None
@@ -33,9 +41,9 @@ db = init_firebase_admin()
 st.set_page_config(page_title="CardioIQ", layout="wide", initial_sidebar_state="expanded")
 st.title("CardioIQ")
 
-ECG_MODEL_PATH = "ecgnet_model.pt"
-CARDIORISK_MODEL_PATH = "cardiorisknet_model.pt"
-ECG_WGAN_PATH = "ecg_wgan_generator.pt"
+ECG_MODEL_PATH = "models/ecgnet_model.pt"
+CARDIORISK_MODEL_PATH = "models/cardiorisknet_model.pt"
+ECG_WGAN_PATH = "models/ecg_wgan_generator.pt"
 
 
 @st.cache_resource
@@ -100,7 +108,7 @@ def save_result(user_uid, profile, filename, ecg_prob, risk_score, features):
 
         "filename": filename,
         "ecg_abnormality_prob": float(ecg_prob),
-        "ecg_prediction": "Abnormal" if ecg_prob >= 0.88 else "Normal",
+        "ecg_prediction": "Abnormal" if ecg_prob >= MODEL_THRESHOLDS["THRESHOLD"] else "Normal",
         "cardio_risk_score": float(risk_score),
         "features": features
     }
@@ -112,98 +120,235 @@ def save_result(user_uid, profile, filename, ecg_prob, risk_score, features):
       .collection("results") \
       .add(data)
 
+def profile_name_exists(profiles, name, exclude_id=None):
+    name = name.strip().lower()
+    for p in profiles:
+        if exclude_id and p["id"] == exclude_id:
+            continue
+        if p["name"].strip().lower() == name:
+            return True
+    return False
 
+def switch_profile():
+    selected_label = st.session_state.active_profile_select
+    st.session_state.active_profile = profile_map[selected_label]
+    for k in [
+        "ecg", "ecg_tensor", "ecg_prob", "ecg_cam", "risk_score",
+        "uploaded_filename", "source_label", "ecg_label", "fake_ecg"
+    ]:
+        st.session_state.pop(k, None)
+    st.toast(f"Switched to profile: {selected_label}")
 
-if 'user' not in st.session_state:
-    auth_mode = st.sidebar.radio("Select Option", ["Login", "Sign Up"])
-    email = st.sidebar.text_input("Email")
-    password = st.sidebar.text_input("Password", type="password")
+if "user" not in st.session_state:
+    auth_mode = st.sidebar.radio(
+        "Select Option", ["Login", "Sign Up"], key="auth_mode_radio"
+    )
+    email = st.sidebar.text_input("Email", key="auth_email")
+    password = st.sidebar.text_input("Password", type="password", key="auth_password")
 
-    if auth_mode == "Login" and st.sidebar.button("Login"):
+    if auth_mode == "Login" and st.sidebar.button("Login", key="login_btn"):
         success, msg = login(email, password)
-        if success: st.success("Logged in!"); st.rerun()
-        else: st.error(f"Login Failed: {msg}")
-    elif auth_mode == "Sign Up" and st.sidebar.button("Sign Up"):
+        if success:
+            st.success("Logged in!")
+            st.rerun()
+        else:
+            st.error(f"Login Failed: {msg}")
+
+    elif auth_mode == "Sign Up" and st.sidebar.button("Sign Up", key="signup_btn"):
         success, msg = signup(email, password)
-        if success: st.success("Account created and logged in!"); st.rerun()
-        else: st.error(f"Signup Failed: {msg}")
+        if success:
+            st.success("Account created and logged in!")
+            st.rerun()
+        else:
+            st.error(f"Signup Failed: {msg}")
+
 else:
     st.sidebar.success(f"Logged in as {st.session_state['user']['email']}")
-    
     user_uid = st.session_state["user"]["localId"]
 
-    profiles_ref = (
-        db.collection("users")
-        .document(user_uid)
-        .collection("profiles")
-    )
-
+    profiles_ref = db.collection("users").document(user_uid).collection("profiles")
     profiles = [p.to_dict() | {"id": p.id} for p in profiles_ref.stream()]
-    
+
+    if profiles and "active_profile" not in st.session_state:
+        st.session_state.active_profile = profiles[0]
+    elif not profiles:
+        st.session_state.pop("active_profile", None)
+
     if profiles:
-        names = [p["name"] for p in profiles]
-        selected = st.sidebar.selectbox("Active profile", names)
+        profile_map = {p['name']: p for p in profiles}
+        profile_names = list(profile_map.keys())
 
-        if st.session_state.get("active_profile_name") != selected:
-            st.session_state.active_profile_name = selected
-            st.session_state.active_profile = next(p for p in profiles if p["name"] == selected)
+        if st.session_state.get("profile_adj"):
+            st.session_state.profile_adj = False
+            st.session_state.active_profile_select = st.session_state.active_profile["name"]
 
-            for key in ["ecg", "ecg_tensor", "ecg_prob", "ecg_cam", "risk_score",
-                        "uploaded_filename", "source_label", "ecg_label", "fake_ecg"]:
-                st.session_state.pop(key, None)
 
-            st.toast("Switched to profile: " + selected)
+        st.sidebar.selectbox(
+            "Active profile",
+            profile_names,
+            key="active_profile_select",
+            on_change=switch_profile
+        )
+
+        if "active_profile" not in st.session_state:
+            st.session_state.active_profile = profile_map[profile_names[0]]
 
     else:
         st.sidebar.info("No profiles yet")
 
+    if st.session_state.get("active_profile"):
+        profile = st.session_state.active_profile
+        pid = profile["id"]
+
+        with st.sidebar.expander("Edit active profile"):
+            new_name = st.text_input("Name", profile["name"], key=f"edit_name_{pid}")
+            new_age = st.number_input("Age", 0, 120, profile["age"], key=f"edit_age_{pid}")
+            new_sex = st.selectbox(
+                "Sex", ["Male", "Female"],
+                index=0 if profile["sex"] == "Male" else 1,
+                key=f"edit_sex_{pid}"
+            )
+            new_height = st.number_input("Height (cm)", 100, 210, profile["height_cm"], key=f"edit_height_{pid}")
+            new_weight = st.number_input("Weight (kg)", 10.0, 200.0, profile["weight_kg"], key=f"edit_weight_{pid}")
+
+            if st.button("Save changes", key=f"save_profile_{pid}"):
+                if not new_name.strip():
+                    st.error("Name cannot be empty.")
+                elif profile_name_exists(profiles, new_name, exclude_id=pid):
+                    st.error("Another profile already has this name.")
+                else:
+                    profiles_ref.document(pid).update({
+                        "name": new_name.strip(),
+                        "age": new_age,
+                        "sex": new_sex,
+                        "height_cm": new_height,
+                        "weight_kg": new_weight,
+                        "updated_at": datetime.utcnow().isoformat()
+                    })
+
+                    st.session_state.active_profile.update({
+                        "name": new_name.strip(),
+                        "age": new_age,
+                        "sex": new_sex,
+                        "height_cm": new_height,
+                        "weight_kg": new_weight
+                    })
+
+                    st.session_state.profile_adj = True
+
+                    st.toast("Profile updated.")
+                    st.rerun()
+
     with st.sidebar.expander("Add new profile"):
-        name = st.text_input("Name")
-        age = st.number_input("Age", 0, 120, 40)
-        sex = st.selectbox("Sex", ["Male", "Female"])
-        height_cm = st.number_input("Height (cm)", 100, 210, 170, step=1)
-        weight_kg = st.number_input("Weight (kg)", 10.0, 200.0, 70.0, step=0.5)
+        name = st.text_input("Name", key="create_name")
+        age = st.number_input("Age", 0, 120, 40, key="create_age")
+        sex = st.selectbox("Sex", ["Male", "Female"], key="create_sex")
+        height = st.number_input("Height (cm)", 100, 210, 170, key="create_height")
+        weight = st.number_input("Weight (kg)", 10.0, 200.0, 70.0, key="create_weight")
 
-        if st.button("Create profile"):
-            profiles_ref.add({
-                "name": name,
-                "age": age,
-                "sex": sex,
-                "height_cm": height_cm,
-                "weight_kg": weight_kg,
-                "created_at": datetime.utcnow().isoformat()
-            })
-            st.rerun()
+        if st.button("Create profile", key="create_profile_btn"):
+            if not name.strip():
+                st.error("Name is required.")
+            elif profile_name_exists(profiles, name):
+                st.error("A profile with this name already exists.")
+            else:
+                _, doc_ref = profiles_ref.add({
+                    "name": name.strip(),
+                    "age": age,
+                    "sex": sex,
+                    "height_cm": height,
+                    "weight_kg": weight,
+                    "created_at": datetime.utcnow().isoformat()
+                })
 
-    if st.sidebar.button("Logout"):
+                st.session_state.active_profile = {
+                    "id": doc_ref.id,
+                    "name": name.strip(),
+                    "age": age,
+                    "sex": sex,
+                    "height_cm": height,
+                    "weight_kg": weight
+                }
+
+                st.session_state.profile_adj = True
+
+                st.toast("Profile created.")
+                st.rerun()
+
+        if st.session_state.get("active_profile"):
+            with st.sidebar.expander("Delete active profile"):
+                confirm = st.checkbox(
+                    f"I understand deleting '{profile['name']}' cannot be undone.",
+                    key=f"delete_confirm_{pid}"
+                )
+
+                if st.button("Delete profile", disabled=not confirm, key=f"delete_profile_{pid}"):
+                    results_ref = profiles_ref.document(pid).collection("results")
+                    for doc in results_ref.stream():
+                        doc.reference.delete()
+
+                    profiles_ref.document(pid).delete()
+
+                    for k in [
+                        "ecg", "ecg_tensor", "ecg_prob", "ecg_cam", "risk_score",
+                        "uploaded_filename", "source_label", "ecg_label", "fake_ecg"
+                    ]:
+                        st.session_state.pop(k, None)
+
+                    remaining = [p for p in profiles if p["id"] != pid]
+                    if remaining:
+                        st.session_state.active_profile = remaining[0]
+                        st.toast(f"Switched to profile: {remaining[0]['name']}")
+                    else:
+                        st.session_state.pop("active_profile", None)
+                        st.sidebar.info("No profiles remaining")
+
+                    st.rerun()
+                    
+    if st.sidebar.button("Logout", key="logout_btn"):
         logout()
         st.rerun()
+
 
 tabs = st.tabs(["Predict", "Profile", "About"])
 
 with tabs[2]:
     st.header("About CardioIQ")
-    st.write("""
-    CardioIQ is an AI-powered cardiovascular analysis tool that combines deep learning 
-    ECG interpretation with a multi-factor cardiovascular risk model.
 
-    Features:\n
-    • ECGNet trained on MIT-BIH Arrhythmia Database
-    • Synthetic ECG generation using Conditional wGAN  
-    • Grad-CAM visualization for ECG  
-    • Multi-factor risk prediction using MLP 
-    • Secure Firebase authentication and storage\n
+    st.markdown("""
+    **CardioIQ** is an experimental, AI-driven cardiovascular analysis platform designed to 
+    explore how deep learning models can integrate physiological signals with lifestyle and 
+    clinical risk factors.
+
+    The system combines automated ECG interpretation with a multi-factor cardiovascular risk 
+    model, providing transparent model outputs and longitudinal trend tracking at the 
+    individual profile level.
     """)
-    st.caption("zain aboobacker. 2025")
 
+    st.markdown("### Core Capabilities")
+
+    st.markdown("""
+    • **ECGNet**: Deep residual SE convolutional network trained on the MIT-BIH Arrhythmia Database for 
+      ECG abnormality detection \n
+    • **Explainability**: Grad-CAM–based visualization highlighting signal regions that 
+      influence model predictions\n
+    • **Synthetic Signal Generation**: wGAN for experimental ECG simulation\n
+    • **Risk Modeling**: Multi-input MLP integrating ECG output with demographics, lifestyle, 
+      and blood pressure metrics\n
+    • **Longitudinal Tracking**: Per-profile result history with baseline comparison and 
+      trend analysis\n  
+    • **Secure Architecture**: Firebase-based authentication and per-user data isolation\n
+    """)
+
+st.divider()
+st.caption("Zain Aboobacker · 2025")
 st.caption("This tool should not be used as a substitute for professional medical advice.")
-
 
 with tabs[0]:
     if 'user' not in st.session_state:
         st.info("Please login or sign up to use the app.")
     else:
-        profile = st.session_state.active_profile
+        profile = st.session_state.get("active_profile")
 
         if not profile:
             st.warning("Create or select a profile to continue.")
@@ -248,9 +393,9 @@ with tabs[0]:
             st.markdown("<small>Generate a synthetic ECG signal using a WGAN model (Experimental)</small>", unsafe_allow_html=True)
 
             disable_generate = st.session_state.get('source_label') == "CSV"
-            generate = st.button("Generate ECG", key="generate_ecg", use_container_width=True, disabled=disable_generate)
+            generate = st.button("Record Simulated ECG", key="simulate_ecg", use_container_width=True, disabled=disable_generate)
             if disable_generate:
-                st.caption("Cannot generate ECG because a CSV is uploaded.")
+                st.caption("Cannot record simulated ECG because a CSV is uploaded.")
             if generate:
                 with torch.inference_mode():
                     ecg_wgan_model.eval()
@@ -265,15 +410,51 @@ with tabs[0]:
                 st.session_state.source_label = "Simulated ECG"
 
         if st.session_state.get('ecg_tensor') is not None:
-            fig = go.Figure(go.Scatter(y=st.session_state['ecg'], mode="lines", line=dict(color="red")))
-            fig.update_layout(
-                title=f"ECG Preview ({st.session_state.get('source_label', '')})",
-                xaxis_title="Samples",
-                yaxis_title="Amplitude",
-                template="plotly_dark",
-                height=300
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            if generate:
+                warning = st.empty()
+                progress = st.empty()
+
+                with st.spinner("Connecting to ECG device..."):
+                    time.sleep(2.0)
+
+                warning.warning("Recording ECG...")
+                progress = progress.progress(0)
+
+                duration_sec = 2.0
+                steps = 20
+
+                for i in range(steps):
+                    percent = int((i + 1) / steps * 100)
+                    progress.progress(percent)
+                    time.sleep(duration_sec / steps)
+
+                warning.empty()
+                progress.empty()
+
+                with st.spinner("Processing ECG…"):
+                    time.sleep(1.0)
+
+                st.toast("ECG captured successfully")
+
+                fig = go.Figure(go.Scatter(y=st.session_state['ecg'], mode="lines", line=dict(color="red")))
+                fig.update_layout(
+                    title=f"ECG Preview ({st.session_state.get('source_label', '')})",
+                    xaxis_title="Samples",
+                    yaxis_title="Amplitude",
+                    template="plotly_dark",
+                    height=300
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                fig = go.Figure(go.Scatter(y=st.session_state['ecg'], mode="lines", line=dict(color="red")))
+                fig.update_layout(
+                    title=f"ECG Preview ({st.session_state.get('source_label', '')})",
+                    xaxis_title="Samples",
+                    yaxis_title="Amplitude",
+                    template="plotly_dark",
+                    height=300
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
         st.subheader("ECGNet Prediction")
@@ -286,7 +467,7 @@ with tabs[0]:
                     st.session_state['ecg_prob'] = float(torch.sigmoid(model(ecg_tensor)).item())
                 cam, _ = gradcam(ecg_tensor)
                 st.session_state['ecg_cam'] = cam.squeeze()
-                st.session_state['ecg_label'] = "Abnormal" if st.session_state['ecg_prob'] >= 0.88 else "Normal"
+                st.session_state['ecg_label'] = "Abnormal" if st.session_state['ecg_prob'] >= MODEL_THRESHOLDS["THRESHOLD"] else "Normal"
 
         if st.session_state.get('ecg_prob') is not None:
     
@@ -304,24 +485,21 @@ with tabs[0]:
         st.subheader("Cardiovascular Risk Prediction")
         st.markdown("*(Only computed after ECG analysis)*")
 
-        exercise = st.slider("Exercise Level (0=Sedentary, 1=Active)", 0.0, 1.0, 0.5)
-        diet = st.slider("Diet Quality (0=Poor, 1=Ideal)", 0.0, 1.0, 0.5)
-        sleep = st.slider("Sleep Quality (0=Poor, 1=Ideal)", 0.0, 1.0, 0.5)
-
-        smoking_per_week = st.slider(
-            "Cigarettes per Week",
-            min_value=0, max_value=140,value=0, step=1)
-
-        alcohol_per_week = st.slider("Alcoholic Drinks per Week", min_value=0, max_value=30, value=0, step=1)
-
         age = profile["age"]
         sex = profile["sex"]
 
         height_cm = profile["height_cm"]
         weight_kg = profile["weight_kg"]
 
-        sys_bp = st.number_input("Systolic BP (mmHg)", min_value=50, max_value=220, value=120)
-        dia_bp = st.number_input("Diastolic BP (mmHg)", min_value=50, max_value=200, value=80)
+        exercise = st.slider("Exercise Level (0=Sedentary, 1=Active)", 0.0, 1.0, 0.5, help="How active the person is on average. 0 = sedentary, 1 = fully active")
+        diet = st.slider("Diet Quality (0=Poor, 1=Ideal)", 0.0, 1.0, 0.5, help="Overall diet quality. 0 = poor, 1 = ideal")
+        sleep = st.slider("Sleep Quality (0=Poor, 1=Ideal)", 0.0, 1.0, 0.5, help="Quality of sleep. 0 = poor, 1 = ideal")
+
+        smoking_per_week = st.slider("Cigarettes per Week", 0, 140, 0, step=1, help="Number of cigarettes smoked per week")
+        alcohol_per_week = st.slider("Alcoholic Drinks per Week", 0, 30, 0, step=1, help="Number of alcoholic drinks per week")
+
+        sys_bp = st.number_input("Systolic BP (mmHg)", 50, 220, 120, help="Systolic blood pressure in mmHg")
+        dia_bp = st.number_input("Diastolic BP (mmHg)", 50, 200, 80, help="Diastolic blood pressure in mmHg")
 
         disable_risk = st.session_state.get('ecg_prob') is None
         if st.button("Compute Cardiovascular Risk", disabled=disable_risk):
@@ -443,7 +621,6 @@ with tabs[1]:
             features = r.get("features", {})
 
             st.markdown("**Demographics & Inputs**")
-
             c1, c2, c3 = st.columns(3)
 
             with c1:
@@ -463,9 +640,8 @@ with tabs[1]:
                     "Blood Pressure",
                     f"{features.get('sys_bp')}/{features.get('dia_bp')}"
                 )
-            
-            st.divider()
 
+            st.divider()
 
             st.markdown("**Model Outputs**")
             c1, c2, c3 = st.columns(3)
@@ -473,108 +649,21 @@ with tabs[1]:
             c2.metric("Risk Score", f"{r['cardio_risk_score']:.2%}")
             c3.metric("Classification", r["ecg_prediction"])
 
-            def add(findings, condition, text, alert=1):
-                if condition:
-                    findings.append((text, alert))
-
-            findings = []
-
-            add(findings, r["ecg_abnormality_prob"] >= 0.85,
-                "ECG abnormality probability markedly elevated", 1)
-
-            add(findings, 0.70 <= r["ecg_abnormality_prob"] < 0.85,
-                "ECG abnormality probability moderately elevated", 1)
-
-            add(findings, r["ecg_abnormality_prob"] < 0.30,
-                "ECG abnormality probability low", 0)
-
-            add(findings, r["cardio_risk_score"] >= 0.70,
-                "Overall cardiovascular risk high", 1)
-
-            add(findings, 0.50 <= r["cardio_risk_score"] < 0.70,
-                "Overall cardiovascular risk moderately elevated", 1)
-
-            add(findings, r["cardio_risk_score"] < 0.30,
-                "Overall cardiovascular risk low", 0)
-
-            delta = r["cardio_risk_score"] - avg_risk
-
-            add(findings, delta >= 0.15,
-                "Risk score significantly above personal baseline", 1)
-
-            add(findings, 0.08 <= delta < 0.15,
-                "Risk score mildly above personal baseline", 1)
-
-            add(findings, delta <= -0.15,
-                "Risk score well below personal baseline", 0)
-
-            sys_bp = features.get("sys_bp")
-            dia_bp = features.get("dia_bp")
-
-            if sys_bp and dia_bp:
-                add(findings, sys_bp >= 140 or dia_bp >= 90,
-                    "Blood pressure in hypertensive range", 1)
-
-                add(findings, 130 <= sys_bp < 140 or 85 < dia_bp < 100,
-                    "Blood pressure elevated", 1)
-
-                add(findings, sys_bp < 120 and dia_bp < 80,
-                    "Blood pressure within normal range", 0)
-
-            add(findings, features.get("exercise", 0) <= 0.5,
-                "Low physical activity", 1)
-
-            add(findings, features.get("sleep", 0) <= 0.5,
-                "Sleep quality below recommended range", 1)
-
-            add(findings, features.get("smoking_per_week", 0) > 0,
-                "Active tobacco exposure reported", 1)
-
-            add(findings, features.get("alcohol_per_week", 0) > 14,
-                "High alcohol consumption reported", 1)
-
-
-            if not findings:
-                findings.append(("No values outside expected range detected", 0))
-
-
             st.markdown("**Findings**")
 
-            for f in findings:
-                finding, alert = f
-                if alert == 0:
-                    st.success(finding)
+            findings = generate_findings(r, avg_risk)
+            for text, severity in findings:
+                if severity == 0:
+                    st.success(text)
+                elif severity == 1:
+                    st.info(text)
+                elif severity == 2:
+                    st.warning(text)
                 else:
-                    st.error(finding)
-
-    st.divider()
-    st.subheader("Event Flags & Extremes")
-
-    highest_risk = max(results, key=lambda x: x["cardio_risk_score"])
-    most_abnormal = max(results, key=lambda x: x["ecg_abnormality_prob"])
-
-
-    if len(risk_scores) >= 5:
-        std = np.std(risk_scores)
-        if std >= 0.12:
-            st.warning("Risk scores show high variability over time")
-
-        if std < 0.05:
-            st.info("Risk scores stable over time")
-
-    st.warning(
-        f"Highest risk recorded: {highest_risk['cardio_risk_score']:.2%} "
-        f"on {highest_risk['timestamp'][:10]}"
-    )
-
-    st.warning(
-        f"Most abnormal ECG probability: {most_abnormal['ecg_abnormality_prob']:.2f} "
-        f"on {most_abnormal['timestamp'][:10]}"
-    )
-
-
+                    st.error(text)
     st.divider()
     st.subheader("Trends Over Time")
+
     timestamps = [pd.to_datetime(r["timestamp"]) for r in results_sorted]
     risk_scores = [r["cardio_risk_score"] for r in results_sorted]
     ecg_probs = [r["ecg_abnormality_prob"] for r in results_sorted]
@@ -585,8 +674,10 @@ with tabs[1]:
         y=risk_scores,
         mode="lines+markers",
         line=dict(color="crimson", width=2),
+        name="Risk",
         hovertemplate="Date: %{x|%b %d}<br>Risk: %{y:.2%}<extra></extra>"
     ))
+    fig_risk.add_hline(y=avg_risk, line=dict(color="gold", dash="dot"), annotation_text="Personal Avg", annotation_position="top right")
     fig_risk.update_layout(title="Risk Score Over Time", yaxis=dict(range=[0, 1], title="Risk Score"), height=300)
     st.plotly_chart(fig_risk, use_container_width=True)
 
@@ -596,8 +687,22 @@ with tabs[1]:
         y=ecg_probs,
         mode="lines+markers",
         line=dict(color="darkblue", width=2),
+        name="ECG Prob",
         hovertemplate="Date: %{x|%b %d}<br>ECG Prob: %{y:.2f}<extra></extra>"
     ))
+
+    fig_ecg.add_hline(y=avg_ecg_prob, line=dict(color="gold", dash="dot"), annotation_text="Personal Avg", annotation_position="top right")
     fig_ecg.update_layout(title="ECG Abnormality Probability Over Time", yaxis=dict(range=[0, 1], title="Probability"), height=300)
     st.plotly_chart(fig_ecg, use_container_width=True)
 
+    st.divider()
+    st.subheader("Download History")
+    if st.button("Prepare Full PDF Report"):
+        with st.spinner("Generating PDF report..."):
+            pdf_file = generate_profile_pdf(profile, results_sorted)
+            st.download_button(
+                "Download PDF",
+                data=pdf_file,
+                file_name="CardioIQ_Profile_Report.pdf",
+                mime="application/pdf"
+            )

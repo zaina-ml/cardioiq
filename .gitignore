@@ -15,7 +15,6 @@ firebase-key.json
 *.h5
 *.pkl
 *.onnx
-*.tflite
 models/
 model/
 checkpoints/
