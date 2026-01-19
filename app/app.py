@@ -3,25 +3,23 @@ import torch
 import numpy as np
 import plotly.graph_objects as go
 import pandas as pd
-import io
-import zipfile
-from fpdf import FPDF
 import time
-import os
-import uuid
 from datetime import datetime
-import tempfile
+import os
+import random
 import pyrebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-from ecgnet import ECGNet
-from cardiorisknet import CardioRiskNet
-from ecg_wgan import ECGGenerator
-from gradcam import GradCAM, plot_ecg_cam
-from generate_report import generate_profile_pdf
-from analysis import generate_findings
-from config import THRESHOLDS, MODEL_THRESHOLDS
+from models.ecgnet import ECGNet
+from models.cardiorisknet import CardioRiskNet
+from analysis.gradcam import GradCAM, plot_ecg_cam
+from analysis.generate_report import generate_profile_pdf
+from analysis.analysis import generate_findings
+from analysis.llm import generate_llm_response
+from analysis.llm import format_results
+
+from config import THRESHOLDS, MODEL_THRESHOLDS, SYSTEM_PROMPT
 
 if "active_profile" not in st.session_state:
     st.session_state.active_profile = None
@@ -41,10 +39,8 @@ db = init_firebase_admin()
 st.set_page_config(page_title="CardioIQ", layout="wide", initial_sidebar_state="expanded")
 st.title("CardioIQ")
 
-ECG_MODEL_PATH = "models/ecgnet_model.pt"
-CARDIORISK_MODEL_PATH = "models/cardiorisknet_model.pt"
-ECG_WGAN_PATH = "models/ecg_wgan_generator.pt"
-
+ECG_MODEL_PATH = "weights/ecgnet_model.pt"
+CARDIORISK_MODEL_PATH = "weights/cardiorisknet_model.pt"
 
 @st.cache_resource
 def load_ecg_model():
@@ -60,15 +56,7 @@ def load_ecg_model():
 def load_risk_model(model_path=CARDIORISK_MODEL_PATH):
     checkpoint = torch.load(model_path, map_location="cpu")
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    model = CardioRiskNet(input_size=11)
-    model.load_state_dict(state_dict)
-    model.eval()
-    return model
-
-@st.cache_resource
-def load_ecg_wgan_model(model_path=ECG_WGAN_PATH):
-    state_dict = torch.load(model_path, map_location="cpu")
-    model = ECGGenerator()
+    model = CardioRiskNet(input_size=13)
     model.load_state_dict(state_dict)
     model.eval()
     return model
@@ -76,7 +64,6 @@ def load_ecg_wgan_model(model_path=ECG_WGAN_PATH):
 try:
     model, gradcam = load_ecg_model()
     cardiorisk_model = load_risk_model()
-    ecg_wgan_model = load_ecg_wgan_model()
 except Exception as e:
     st.error(f"Model load error: {e}")
     st.stop()
@@ -169,11 +156,6 @@ else:
     profiles_ref = db.collection("users").document(user_uid).collection("profiles")
     profiles = [p.to_dict() | {"id": p.id} for p in profiles_ref.stream()]
 
-    if profiles and "active_profile" not in st.session_state:
-        st.session_state.active_profile = profiles[0]
-    elif not profiles:
-        st.session_state.pop("active_profile", None)
-
     if profiles:
         profile_map = {p['name']: p for p in profiles}
         profile_names = list(profile_map.keys())
@@ -182,6 +164,14 @@ else:
             st.session_state.profile_adj = False
             st.session_state.active_profile_select = st.session_state.active_profile["name"]
 
+        if st.session_state.get("active_profile") is None:
+            if len(profile_names) > 0:
+                st.session_state.active_profile = profiles[0]
+                st.session_state.active_profile_select = profiles[0]["name"]
+        
+        if "active_profile_select" not in st.session_state:
+            st.session_state.active_profile_select = profile_names[0]
+
 
         st.sidebar.selectbox(
             "Active profile",
@@ -189,9 +179,6 @@ else:
             key="active_profile_select",
             on_change=switch_profile
         )
-
-        if "active_profile" not in st.session_state:
-            st.session_state.active_profile = profile_map[profile_names[0]]
 
     else:
         st.sidebar.info("No profiles yet")
@@ -236,7 +223,6 @@ else:
 
                     st.session_state.profile_adj = True
 
-                    st.toast("Profile updated.")
                     st.rerun()
 
     with st.sidebar.expander("Add new profile"):
@@ -272,7 +258,6 @@ else:
 
                 st.session_state.profile_adj = True
 
-                st.toast("Profile created.")
                 st.rerun()
 
         if st.session_state.get("active_profile"):
@@ -310,9 +295,9 @@ else:
         st.rerun()
 
 
-tabs = st.tabs(["Predict", "Profile", "About"])
+tabs = st.tabs(["Predict", "Profile", "CardioAI", "About"])
 
-with tabs[2]:
+with tabs[3]:
     st.header("About CardioIQ")
 
     st.markdown("""
@@ -336,13 +321,15 @@ with tabs[2]:
     • **Risk Modeling**: Multi-input MLP integrating ECG output with demographics, lifestyle, 
       and blood pressure metrics\n
     • **Longitudinal Tracking**: Per-profile result history with baseline comparison and 
-      trend analysis\n  
+      trend analysis\n
+    • **LLM Functionality**: Integrated LLM with hard guidlines and user result knowledge.\n
     • **Secure Architecture**: Firebase-based authentication and per-user data isolation\n
     """)
 
 st.divider()
 st.caption("Zain Aboobacker · 2025")
 st.caption("This tool should not be used as a substitute for professional medical advice.")
+
 
 with tabs[0]:
     if 'user' not in st.session_state:
@@ -390,20 +377,32 @@ with tabs[0]:
 
         with col_right:
             st.write("### Simulated ECG Device")
-            st.markdown("<small>Generate a synthetic ECG signal using a WGAN model (Experimental)</small>", unsafe_allow_html=True)
+            st.markdown("<small>Simulate ECG Device Recording</small>", unsafe_allow_html=True)
 
             disable_generate = st.session_state.get('source_label') == "CSV"
             generate = st.button("Record Simulated ECG", key="simulate_ecg", use_container_width=True, disabled=disable_generate)
+            ask_type = st.checkbox("Abnormal", key="ask_ecg_type")
+
             if disable_generate:
                 st.caption("Cannot record simulated ECG because a CSV is uploaded.")
             if generate:
-                with torch.inference_mode():
-                    ecg_wgan_model.eval()
-                    z = torch.randn(1, 100)
-                    ecg_fake = ecg_wgan_model(z).detach().cpu().numpy().squeeze()
+                data_folder = os.path.join(os.path.dirname(__file__), "..", "data")
 
-                st.session_state['ecg'] = ecg_fake
-                st.session_state['ecg_tensor'] = torch.tensor(ecg_fake, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                categories = ["normal", "abnormal"]
+                category = "abnormal" if ask_type else "normal"
+
+                category_folder = os.path.join(data_folder, category)
+
+                csv_files = [f for f in os.listdir(category_folder) if f.endswith(".csv")]
+
+                r_ecg = random.choice(csv_files)
+                random_ecg_path = os.path.join(category_folder, r_ecg)
+                ecg_data = np.loadtxt(random_ecg_path, delimiter=",")
+                ecg_data = (ecg_data - ecg_data.mean()) / (ecg_data.std() + 1e-8)
+                ecg_data = np.pad(ecg_data, (0, max(0, window_size - len(ecg_data))))[:window_size]
+
+                st.session_state['ecg'] = ecg_data
+                st.session_state['ecg_tensor'] = torch.tensor(ecg_data, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
                 st.session_state['ecg_prob'] = None
                 st.session_state['ecg_cam'] = None
                 st.session_state.pop('risk_score', None)
@@ -460,24 +459,32 @@ with tabs[0]:
         st.subheader("ECGNet Prediction")
 
         analyze_disabled = st.session_state.get('ecg_tensor') is None
+        
         if st.button("Analyze ECG", disabled=analyze_disabled):
             with st.spinner("Analyzing ECG..."):
-                ecg_tensor = st.session_state['ecg_tensor']
+                ecg_tensor = st.session_state["ecg_tensor"]
+
                 with torch.inference_mode():
-                    st.session_state['ecg_prob'] = float(torch.sigmoid(model(ecg_tensor)).item())
+                    logits = model(ecg_tensor)
+                    prob = torch.sigmoid(logits).item()
+
+                st.session_state["ecg_prob"] = float(prob)
+                st.session_state["ecg_label"] = (
+                    "Abnormal" if prob >= MODEL_THRESHOLDS["THRESHOLD"] else "Normal"
+                )
+
                 cam, _ = gradcam(ecg_tensor)
-                st.session_state['ecg_cam'] = cam.squeeze()
+                st.session_state["ecg_cam"] = cam.squeeze()
                 st.session_state['ecg_label'] = "Abnormal" if st.session_state['ecg_prob'] >= MODEL_THRESHOLDS["THRESHOLD"] else "Normal"
 
         if st.session_state.get('ecg_prob') is not None:
-    
             st.markdown(
                 f"<p class='{ 'big-font' if st.session_state.ecg_label=='Abnormal' else 'normal-font' }'>Prediction: {st.session_state.ecg_label}</p>",
                 unsafe_allow_html=True
             )
             st.metric(label="Abnormal Probability", value=f"{st.session_state.ecg_prob:.2f}")
 
-            fig_cam = plot_ecg_cam(st.session_state['ecg_tensor'], st.session_state['ecg_cam'], st.session_state['ecg_label'])
+            fig_cam = plot_ecg_cam(st.session_state['ecg_tensor'], st.session_state['ecg_cam'], st.session_state['ecg_prob'], st.session_state['ecg_label'])
             st.plotly_chart(fig_cam, use_container_width=True)
         
         st.divider()
@@ -501,21 +508,26 @@ with tabs[0]:
         sys_bp = st.number_input("Systolic BP (mmHg)", 50, 220, 120, help="Systolic blood pressure in mmHg")
         dia_bp = st.number_input("Diastolic BP (mmHg)", 50, 200, 80, help="Diastolic blood pressure in mmHg")
 
+        hr = st.number_input("Heart Rate (BPM)", 50, 220, 120, help="Heart rate in beats per minute")
+        spo2 = st.number_input("SpO2 (%)", 50, 100, 98, help="Oxygen saturation percentage")
+
         disable_risk = st.session_state.get('ecg_prob') is None
         if st.button("Compute Cardiovascular Risk", disabled=disable_risk):
             with st.spinner("Computing cardiovascular risk..."):
                 ecg_prob = st.session_state['ecg_prob']
 
-                age_norm = (age - 20) / 60
+                age_norm = (age - 20) / 65
                 height_m = height_cm / 100.0
                 bmi = weight_kg / (height_m ** 2)
 
-                bmi_norm = (bmi - 18.5) / 16.5
+                bmi_norm = (bmi - 18.5) / 21.5
                 bmi_norm = max(0.0, min(bmi_norm, 1.0))
-                sys_bp_norm = (sys_bp - 90) / 90
-                dia_bp_norm = (dia_bp - 60) / 60
+                sys_bp_norm = (sys_bp - 90) / 110
+                dia_bp_norm = (dia_bp - 60) / 70
                 smoking_norm = smoking_per_week / 140
                 alcohol_norm = alcohol_per_week / 30
+                hr_norm = min(abs(hr-75) / 40, 1.0)
+                spo2_norm = min((100 - spo2) / 15, 1.0)
                 sex_val = 1 if sex == "Female" else 0
                 
                 risk_features = torch.tensor([
@@ -529,7 +541,9 @@ with tabs[0]:
                     sex_val,
                     bmi_norm,
                     sys_bp_norm,
-                    dia_bp_norm
+                    dia_bp_norm,
+                    hr_norm,
+                    spo2_norm
                 ], dtype=torch.float32).unsqueeze(0)
 
                 with torch.inference_mode():
@@ -557,7 +571,9 @@ with tabs[0]:
                 "smoking_per_week": smoking_per_week,
                 "alcohol_per_week": alcohol_per_week,
                 "sys_bp": sys_bp,
-                "dia_bp": dia_bp
+                "dia_bp": dia_bp,   
+                "hr": hr,
+                "spo2": spo2
             }
 
             save_result(user_uid, profile, filename, ecg_prob, risk_score, features)
@@ -629,17 +645,19 @@ with tabs[1]:
                 st.metric("BMI", round(features.get("bmi", 0), 1))
 
             with c2:
-                st.metric("Exercise Quality", features.get("exercise"))
-                st.metric("Sleep Quality", features.get("sleep"))
-                st.metric("Diet Quality", features.get("diet"))
-
-            with c3:
-                st.metric("Smoking / week", features.get("smoking_per_week"))
-                st.metric("Alcohol / week", features.get("alcohol_per_week"))
+                st.metric("Heart Rate (bpm)", features.get("hr"))
+                st.metric("SpO₂ (%)", features.get("spo2"))
                 st.metric(
                     "Blood Pressure",
                     f"{features.get('sys_bp')}/{features.get('dia_bp')}"
                 )
+
+            with c3:
+                st.metric("Exercise Quality", features.get("exercise"))
+                st.metric("Sleep Quality", features.get("sleep"))
+                st.metric("Diet Quality", features.get("diet"))
+                st.metric("Smoking / week", features.get("smoking_per_week"))
+                st.metric("Alcohol / week", features.get("alcohol_per_week"))
 
             st.divider()
 
@@ -706,3 +724,60 @@ with tabs[1]:
                 file_name="CardioIQ_Profile_Report.pdf",
                 mime="application/pdf"
             )
+
+with tabs[2]:
+    if 'user' not in st.session_state:
+        st.info("Please login to access the AI assistant.")
+        st.stop()
+    
+    
+    st.header("CardioAI - Cardiovascular AI Assistant")
+    st.caption("Chat with the CardioIQ AI Assistant about your cardiovascular data and health.")
+
+    profile = st.session_state.active_profile
+    if not profile:
+        st.warning("Select a profile to view history.")
+        st.stop()
+
+    user_uid = st.session_state['user']['localId']
+    results_ref = (
+        db.collection("users")
+        .document(user_uid)
+        .collection("profiles")
+        .document(profile["id"])
+        .collection("results")
+    )
+
+    results = [r.to_dict() | {"id": r.id} for r in results_ref.stream()]
+
+    if not results:
+        st.info("No past results yet. Run an analysis in the Predict tab.")
+        st.stop()
+
+    results_sorted = sorted(results, key=lambda x: x["timestamp"], reverse=True)
+    options = [
+        f"{r['timestamp'][:19]} | Risk: {r['cardio_risk_score']:.2%} | ECG: {r['ecg_prediction']}"
+        for r in results_sorted
+    ]
+    selected_index = st.selectbox("Select a result to discuss with AI:", range(len(options)), format_func=lambda i: options[i])
+    selected_result = results_sorted[selected_index]
+
+    results_text = format_results([selected_result]) 
+    st.divider()
+
+    user_input = st.chat_input("Type a message...")
+    
+    if user_input:
+        st.chat_message("user").write(user_input)
+
+        with st.spinner("CardioAI is formulating a response, this may take a while..."):
+            full_response = generate_llm_response(user_input, results_text, SYSTEM_PROMPT)
+
+        message_container = st.chat_message("assistant")
+        text_placeholder = message_container.empty()
+
+        displayed_text = ""
+        for char in full_response:
+            displayed_text += char
+            text_placeholder.markdown(displayed_text)
+            time.sleep(0.02)

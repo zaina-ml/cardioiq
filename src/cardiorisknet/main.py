@@ -7,7 +7,7 @@ from model import CardioRiskNet
 from train import train_model
 
 print(f"[INFO] Creating synthetic dataset...")
-dataset = SyntheticPatientDataset(num_samples=1000)
+dataset = SyntheticPatientDataset(num_samples=2000)
 
 print(f"[INFO] Creating model...")
 model = CardioRiskNet(input_size=dataset.features.shape[1]).to(CFG.device)

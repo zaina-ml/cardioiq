@@ -40,14 +40,35 @@ def generate_findings(result, avg_risk):
         elif sys_bp < 120 and dia_bp < 80:
             findings.append(("Blood pressure within normal range", 0))
 
-    if f.get("exercise") is not None and f.get("exercise") < 0.3:
+    if f.get("exercise") is not None and f.get("exercise") < THRESHOLDS["EXERCISE_LOW"]:
         findings.append(("Low physical activity", 2))
-    if f.get("sleep") is not None and f.get("sleep") < 0.3:
+    if f.get("sleep") is not None and f.get("sleep") < THRESHOLDS["SLEEP_LOW"]:
         findings.append(("Sleep quality below recommended range", 2))
     if f.get("smoking_per_week", 0) > 0:
         findings.append(("Active tobacco exposure reported", 3))
     if f.get("alcohol_per_week", 0) > 14:
         findings.append(("High alcohol consumption reported", 2))
+
+    if f.get("diet") is not None and f.get("diet") < THRESHOLDS["DIET_LOW"]:
+        findings.append(("Diet quality below recommended range", 2))
+    if f.get("bmi") is not None:
+        if f["bmi"] >= THRESHOLDS["BMI_OBESE"]:
+            findings.append(("Obesity detected based on BMI", 3))
+        elif f["bmi"] >= THRESHOLDS["BMI_OVERWEIGHT"]:
+            findings.append(("Overweight status detected based on BMI", 2))
+        elif f["bmi"] < THRESHOLDS["BMI_UNDERWEIGHT"]:
+            findings.append(("Underweight status detected based on BMI", 2))
+    if f.get("age") is not None and f["age"] >= 65:
+        findings.append(("Advanced age is a non-modifiable risk factor", 2))
+    
+    if f.get("hr") is not None:
+        if f["hr"] < THRESHOLDS["HR_LOW"]:
+            findings.append(("Low heart rate detected", 2))
+        elif f["hr"] > THRESHOLDS["HR_HIGH"]:
+            findings.append(("High heart rate detected", 2))
+
+    if f.get("spo2") is not None and f["spo2"] < THRESHOLDS["SPO2_LOW"]:
+        findings.append(("Low blood oxygen saturation detected", 2))
 
     if not findings:
         findings.append(("No values outside expected range detected", 0))

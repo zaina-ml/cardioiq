@@ -15,16 +15,13 @@ firebase-key.json
 *.h5
 *.pkl
 *.onnx
-models/
-model/
+*.json
+*.mp4
+
 checkpoints/
 weights/
 
 
-submission/
-submissions/
-*/submission/
-*/submissions/
 
 .DS_Store
 .vscode/

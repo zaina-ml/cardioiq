@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from fpdf import FPDF
 
 from config import PDF_CONFIG
-from analysis import generate_findings
+from analysis.analysis import generate_findings
 
 
 def generate_profile_pdf(profile, results_sorted):
