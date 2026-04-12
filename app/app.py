@@ -31,7 +31,9 @@ auth = firebase.auth()
 
 def init_firebase_admin():
     if not firebase_admin._apps:
-        cred = credentials.Certificate(".streamlit/service_account.json")
+        service_account_info = dict(st.secrets["service_account"])
+        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+        cred = credentials.Certificate(service_account_info)
         firebase_admin.initialize_app(cred)
     return firestore.client()
 
