@@ -10,8 +10,7 @@ firebase-key.json
 *.json 
 
 
-*.pt
-*.pth
+
 *.h5
 *.pkl
 *.onnx
@@ -19,7 +18,6 @@ firebase-key.json
 *.mp4
 
 checkpoints/
-weights/
 
 
 
