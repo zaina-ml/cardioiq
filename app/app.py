@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 import pandas as pd
 import time
+import re
 from datetime import datetime
 import os
 import random
@@ -42,6 +43,12 @@ st.title("CardioIQ")
 ECG_MODEL_PATH = "weights/ecgnet_model.pt"
 CARDIORISK_MODEL_PATH = "weights/cardiorisknet_model.pt"
 
+def to_email(username: str) -> str:
+    return f"{username.strip().lower()}@cardioiq.local"
+
+def is_valid_username(username: str) -> bool:
+    return bool(re.match(r'^[a-zA-Z0-9._-]+$', username))
+
 @st.cache_resource
 def load_ecg_model():
     model = ECGNet()
@@ -71,7 +78,12 @@ except Exception as e:
 def login(email, password):
     try:
         user = auth.sign_in_with_email_and_password(email, password)
-        st.session_state['user'] = {"localId": user.get("localId"), "email": user.get("email")}
+        username = user.get("email", "").replace("@cardioiq.local", "")
+        st.session_state['user'] = {
+            "localId": user.get("localId"),
+            "email": user.get("email"),
+            "username": username
+        }
         return True, None
     except Exception as e:
         return False, str(e)
@@ -79,7 +91,12 @@ def login(email, password):
 def signup(email, password):
     try:
         user = auth.create_user_with_email_and_password(email, password)
-        st.session_state['user'] = {"localId": user.get("localId"), "email": user.get("email")}
+        username = user.get("email", "").replace("@cardioiq.local", "")
+        st.session_state['user'] = {
+            "localId": user.get("localId"),
+            "email": user.get("email"),
+            "username": username
+        }
         return True, None
     except Exception as e:
         return False, str(e)
@@ -130,27 +147,39 @@ if "user" not in st.session_state:
     auth_mode = st.sidebar.radio(
         "Select Option", ["Login", "Sign Up"], key="auth_mode_radio"
     )
-    email = st.sidebar.text_input("Email", key="auth_email")
+    username = st.sidebar.text_input("Username", key="auth_username")
     password = st.sidebar.text_input("Password", type="password", key="auth_password")
 
     if auth_mode == "Login" and st.sidebar.button("Login", key="login_btn"):
-        success, msg = login(email, password)
-        if success:
-            st.success("Logged in!")
-            st.rerun()
+        if not username.strip():
+            st.error("Username cannot be empty.")
+        elif not is_valid_username(username):
+            st.error("Username can only contain letters, numbers, dots, hyphens, and underscores.")
         else:
-            st.error(f"Login Failed: {msg}")
+            success, msg = login(to_email(username), password)
+            if success:
+                st.success("Logged in!")
+                st.rerun()
+            else:
+                st.error("Login failed. Please check your username and password.")
 
     elif auth_mode == "Sign Up" and st.sidebar.button("Sign Up", key="signup_btn"):
-        success, msg = signup(email, password)
-        if success:
-            st.success("Account created and logged in!")
-            st.rerun()
+        if not username.strip():
+            st.error("Username cannot be empty.")
+        elif not is_valid_username(username):
+            st.error("Username can only contain letters, numbers, dots, hyphens, and underscores.")
+        elif len(password) < 6:
+            st.error("Password must be at least 6 characters.")
         else:
-            st.error(f"Signup Failed: {msg}")
+            success, msg = signup(to_email(username), password)
+            if success:
+                st.success("Account created and logged in!")
+                st.rerun()
+            else:
+                st.error("Signup failed. Please try again.")
 
 else:
-    st.sidebar.success(f"Logged in as {st.session_state['user']['email']}")
+    st.sidebar.success(f"Logged in as {st.session_state['user']['username']}")
     user_uid = st.session_state["user"]["localId"]
 
     profiles_ref = db.collection("users").document(user_uid).collection("profiles")
@@ -171,7 +200,6 @@ else:
         
         if "active_profile_select" not in st.session_state:
             st.session_state.active_profile_select = profile_names[0]
-
 
         st.sidebar.selectbox(
             "Active profile",
@@ -310,21 +338,6 @@ with tabs[3]:
     individual profile level.
     """)
 
-    st.markdown("### Core Capabilities")
-
-    st.markdown("""
-    • **ECGNet**: Deep residual SE convolutional network trained on the MIT-BIH Arrhythmia Database for 
-      ECG abnormality detection \n
-    • **Explainability**: Grad-CAM–based visualization highlighting signal regions that 
-      influence model predictions\n
-    • **Synthetic Signal Generation**: wGAN for experimental ECG simulation\n
-    • **Risk Modeling**: Multi-input MLP integrating ECG output with demographics, lifestyle, 
-      and blood pressure metrics\n
-    • **Longitudinal Tracking**: Per-profile result history with baseline comparison and 
-      trend analysis\n
-    • **LLM Functionality**: Integrated LLM with hard guidlines and user result knowledge.\n
-    • **Secure Architecture**: Firebase-based authentication and per-user data isolation\n
-    """)
 
 st.divider()
 st.caption("Zain Aboobacker · 2025")
@@ -478,8 +491,9 @@ with tabs[0]:
                 st.session_state['ecg_label'] = "Abnormal" if st.session_state['ecg_prob'] >= MODEL_THRESHOLDS["THRESHOLD"] else "Normal"
 
         if st.session_state.get('ecg_prob') is not None:
+            label = st.session_state.ecg_label
             st.markdown(
-                f"<p class='{ 'big-font' if st.session_state.ecg_label=='Abnormal' else 'normal-font' }'>Prediction: {st.session_state.ecg_label}</p>",
+                f"<p class=\"{'big-font' if label == 'Abnormal' else 'normal-font'}\">Prediction: {label}</p>",
                 unsafe_allow_html=True
             )
             st.metric(label="Abnormal Probability", value=f"{st.session_state.ecg_prob:.2f}")
@@ -707,7 +721,7 @@ with tabs[1]:
         line=dict(color="darkblue", width=2),
         name="ECG Prob",
         hovertemplate="Date: %{x|%b %d}<br>ECG Prob: %{y:.2f}<extra></extra>"
-    ))
+      ))
 
     fig_ecg.add_hline(y=avg_ecg_prob, line=dict(color="gold", dash="dot"), annotation_text="Personal Avg", annotation_position="top right")
     fig_ecg.update_layout(title="ECG Abnormality Probability Over Time", yaxis=dict(range=[0, 1], title="Probability"), height=300)
@@ -730,9 +744,8 @@ with tabs[2]:
         st.info("Please login to access the AI assistant.")
         st.stop()
     
-    
     st.header("CardioAI - Cardiovascular AI Assistant")
-    st.caption("Chat with the CardioIQ AI Assistant about your cardiovascular data and health.")
+    st.caption("The AI assistant is temporarily unavailable. Please check back later.")
 
     profile = st.session_state.active_profile
     if not profile:
@@ -762,22 +775,7 @@ with tabs[2]:
     selected_index = st.selectbox("Select a result to discuss with AI:", range(len(options)), format_func=lambda i: options[i])
     selected_result = results_sorted[selected_index]
 
-    results_text = format_results([selected_result]) 
+    results_text = format_results([selected_result])
     st.divider()
 
-    user_input = st.chat_input("Type a message...")
-    
-    if user_input:
-        st.chat_message("user").write(user_input)
-
-        with st.spinner("CardioAI is formulating a response, this may take a while..."):
-            full_response = generate_llm_response(user_input, results_text, SYSTEM_PROMPT)
-
-        message_container = st.chat_message("assistant")
-        text_placeholder = message_container.empty()
-
-        displayed_text = ""
-        for char in full_response:
-            displayed_text += char
-            text_placeholder.markdown(displayed_text)
-            time.sleep(0.02)
+    user_input = st.chat_input("Type a message...", disabled=True)

@@ -1,4 +1,3 @@
-
 import requests
 
 def format_results(results, max_entries=5):
@@ -31,33 +30,9 @@ def format_results(results, max_entries=5):
     return "\n\n".join(summary_lines)
 
 def generate_llm_response(user_input, results_text, SYSTEM_PROMPT):
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": results_text + "\nUser question: " + user_input}
-    ]
+    return (
+        "The AI assistant is temporarily unavailable. "
+        "Please check back later."
+    )
 
-    api_url = "http://127.0.0.1:1234/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer lm-studio"
-    }
-
-    payload = {
-        "model": "liquid/lfm2-1.2b",
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 700
-    }
-
-    full_response = ""
-
-    try:
-        response = requests.post(api_url, json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        full_response = data['choices'][0]['message']['content']
-
-    except requests.exceptions.RequestException as e:
-        full_response = f"Error connecting to AI server: {e}"
-    
-    return full_response
+    # Adding functionality to enable LLM response generation when the API is available.
