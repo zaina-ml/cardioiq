@@ -1,0 +1,11 @@
+streamlit
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+numpy
+pandas
+plotly
+fpdf2
+pyrebase4
+firebase-admin
+scipy
+urllib3==1.26.6
